@@ -9,7 +9,7 @@
 | 用途 | 地址 |
 | --- | --- |
 | 本地仓库 | `/data/Project/llmbench` |
-| GitHub | `peach0x33a/llmbench`（私有） |
+| GitHub | `peach0x33a/llmbench`（公开） |
 | 入口 | `./llmbench.py` |
 
 ## 快速开始
