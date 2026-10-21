@@ -1,30 +1,22 @@
 #!/usr/bin/env python3
-"""llmbench — 一个脚本测任意 LLM API 的延迟与吞吐。
+"""llmbench — 量一下某个 LLM API 到底有多快。
 
-合并自 /root 下的 bench_latency.sh、bench_ttft.sh、bench_full.sh、
-bench_ipv4_test.py、bench_suite.py、bench-6luna.py。
+一条命令测出 TTFB、TTFT、prefill 速率和 decode 吞吐。来源既可以是本机
+已装的 Coding Agent，也可以是裸 URL：
 
-来源（第一个位置参数）可以是本机已装 Coding Agent 的配置，也可以是裸 URL：
+  ./llmbench.py --list                       列出本机可用来源
+  ./llmbench.py claudeflare                  直接写 opencode 里的 provider 名
+  ./llmbench.py opencode:bacon-responses     显式写法
+  ./llmbench.py claude                       读 Claude Code 的配置
+  ./llmbench.py codex                        读 Codex CLI 的配置
+  ./llmbench.py https://host/v1 --key-env K  裸地址
 
-  opencode:<provider>   读 ~/.config/opencode/opencode.jsonc（省略前缀也行，直接写 provider 名）
-  claude                读 ~/.claude/settings.json 的 env（Anthropic 协议）
-  codex                 读 ~/.codex/config.toml 的 [model_providers.*]
-  https://host/v1       裸地址，配合 --key / --key-env
+三种线协议都支持：OpenAI chat/completions、OpenAI responses、Anthropic
+messages。来源里配的模型变体（--variant）和推理力度（--effort）会翻译成
+对应协议的字段。
 
-例：
-  ./llmbench.py --list
-  ./llmbench.py claudeflare --model deepseek-v4-flash --runs 3
-  ./llmbench.py opencode:bacon-responses --model gpt-6-luna --context-tokens 200000
-  ./llmbench.py claude --model claude-sonnet-5-5 --runs 2
-  ./llmbench.py codex --runs 2
-  ./llmbench.py https://claudeflare.top/v1 --key-env CF_KEY --model deepseek-v4-flash
-
-指标：
-  TTFB    从发出请求到收到响应头
-  think   响应头 → 第一个思考 token（网关把思考流式下发时才有，否则为 -）
-  TTFT    从发出请求到第一个可见正文 token（隐藏思考会算进来）
-  prefill prompt_tokens / TTFT（含思考，是纯 prefill 的下界）
-  decode  可见输出 token / (总耗时 - TTFT)
+指标口径和更多用法见 README。两个要点：思考与正文分开计时；网关回的
+usage 只当参考，和实际字符量对不上时按字符估算并在输出里注明。
 """
 
 from __future__ import annotations
@@ -47,6 +39,8 @@ import requests
 
 # 单例 session：便于统一开/关代理（--no-proxy）
 SESSION = requests.Session()
+
+__version__ = "1.0.0"
 
 OPENCODE_CONFIG = os.path.expanduser("~/.config/opencode/opencode.jsonc")
 CLAUDE_CONFIG = os.path.expanduser("~/.claude/settings.json")
@@ -852,30 +846,40 @@ def build_prompt(args) -> str:
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="统一 LLM API 测速：TTFB / TTFT / prefill / decode tok/s",
+        description="量一下某个 LLM API 到底有多快：TTFB、TTFT、prefill、decode。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "示例：\n"
+            "  ./llmbench.py --list\n"
+            "  ./llmbench.py claudeflare --runs 3\n"
+            "  ./llmbench.py opencode:bacon-responses -m gpt-6-luna --context-tokens 200000\n"
+            "  ./llmbench.py claude --model claude-sonnet-5-5 --runs 2\n"
+            "  ./llmbench.py codex\n"
+            "  ./llmbench.py https://host/v1 --key-env CF_KEY -m deepseek-v4-flash --runs 3\n"
+            "\n"
             "来源写法：\n"
-            "  claudeflare                      opencode 里配置的 provider\n"
-            "  opencode:claudeflare             同上，显式\n"
-            "  claude | codex                   从对应 CLI 配置读\n"
-            "  https://host/v1 --key-env K      裸地址\n"
+            "  <provider>                   opencode 里配置的 provider 名\n"
+            "  opencode:<provider>          同上，显式前缀\n"
+            "  claude                       ~/.claude/settings.json\n"
+            "  codex                        ~/.codex/config.toml\n"
+            "  https://...                  裸地址，配 --key 或 --key-env\n"
         ),
     )
     ap.add_argument("source", nargs="?", help="来源：provider 名 / claude / codex / https://...")
     ap.add_argument("--list", action="store_true", help="列出本机可用来源")
     ap.add_argument("--list-models", action="store_true", help="列出模型（优先请求 /models）")
-    ap.add_argument("-m", "--model", help="模型名")
+    ap.add_argument("-V", "--version", action="version", version=f"llmbench {__version__}")
+    ap.add_argument("-m", "--model", help="模型名（来源里只有一个模型时可省略）")
     ap.add_argument("--runs", type=int, default=3, help="轮数（默认 3）")
     ap.add_argument("-c", "--concurrency", type=int, default=1, help="每轮并发数（默认 1）")
     ap.add_argument("--max-tokens", type=int, default=1200, help="输出上限（默认 1200）")
-    ap.add_argument("--effort", choices=["none", "low", "high", "max"], help="推理力度")
-    ap.add_argument("--variant", help="opencode 变体 id（如 none/low/high/max）")
+    ap.add_argument("--effort", choices=["none", "low", "high", "max"], help="推理力度，按协议翻译成对应字段")
+    ap.add_argument("--variant", help="opencode 模型变体 id（如 none/low/high/max）")
     ap.add_argument("--prompt", help="提示词")
     ap.add_argument("--prompt-file", help="从文件读提示词")
-    ap.add_argument("--context-tokens", type=int, default=0, help="前填充上下文 token 数")
-    ap.add_argument("--fixed-context", action="store_true", help="固定前缀，便于命中缓存")
-    ap.add_argument("--no-stream", action="store_true", help="非流式（只测总耗时）")
+    ap.add_argument("--context-tokens", type=int, default=0, help="前置填充上下文 token 数")
+    ap.add_argument("--fixed-context", action="store_true", help="固定前缀，便于命中 prompt cache")
+    ap.add_argument("--no-stream", action="store_true", help="非流式，只测总耗时")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--timeout", type=float, default=300.0, help="请求超时秒数（默认 300）")
     ap.add_argument("--retries", type=int, default=1, help="瞬时错误重试次数（默认 1）")
@@ -885,11 +889,11 @@ def parse_args(argv=None):
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--key", help="裸 URL 模式的 api key")
     ap.add_argument("--key-env", help="裸 URL 模式：从该环境变量读 api key")
-    ap.add_argument("--protocol", choices=PROTOCOLS, help="裸 URL 模式下手动指定协议")
+    ap.add_argument("--protocol", choices=PROTOCOLS, help="手动指定协议（默认按来源或路径猜）")
     ap.add_argument("--header", action="append", default=[], metavar="K:V", help="额外请求头，可重复")
-    ap.add_argument("--ipv4", action="store_true", help="只解析 IPv4（本机到 CF 的 IPv6 曾间歇丢包）")
+    ap.add_argument("--ipv4", action="store_true", help="只解析 IPv4（部分主机 IPv6 会间歇丢包）")
     ap.add_argument("--no-proxy", action="store_true", help="忽略 HTTP(S)_PROXY 环境变量")
-    ap.add_argument("--user-agent", help="覆盖 User-Agent")
+    ap.add_argument("--user-agent", help="覆盖 User-Agent（默认伪装成 curl，绕开 CF 的爬虫拦截）")
     return ap.parse_args(argv)
 
 
